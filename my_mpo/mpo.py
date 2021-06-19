@@ -10,9 +10,9 @@ from torch.nn.utils import clip_grad_norm_
 from torch.distributions import MultivariateNormal, Categorical
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 from tensorboardX import SummaryWriter
-from mpo.actor import ActorContinuous, ActorDiscrete
-from mpo.critic import CriticContinuous, CriticDiscrete
-from mpo.replaybuffer import ReplayBuffer
+from my_mpo.actor import Actor
+from my_mpo.critic import Critic
+from my_mpo.replaybuffer import ReplayBuffer
 
 
 def bt(m):
@@ -122,18 +122,11 @@ class MPO(object):
                  evaluate_episode_maxstep=200):
         self.device = device
         self.env = env
-        if self.env.action_space.dtype == np.float32:
-            self.continuous_action_space = True
-        else:  # discrete action space
-            self.continuous_action_space = False
 
         # the number of dimensions of state space
         self.ds = env.observation_space.shape[0]
         # the number of dimensions of action space
-        if self.continuous_action_space:
-            self.da = env.action_space.shape[0]
-        else:  # discrete action space
-            self.da = env.action_space.n
+        self.da = env.action_space.shape[0]
 
         self.ε_dual = dual_constraint
         self.ε_kl_μ = kl_mean_constraint
@@ -156,19 +149,10 @@ class MPO(object):
         self.evaluate_episode_num = evaluate_episode_num
         self.evaluate_episode_maxstep = evaluate_episode_maxstep
 
-        if not self.continuous_action_space:
-            self.A_eye = torch.eye(self.da).to(self.device)
-
-        if self.continuous_action_space:
-            self.actor = ActorContinuous(env).to(self.device)
-            self.critic = CriticContinuous(env).to(self.device)
-            self.target_actor = ActorContinuous(env).to(self.device)
-            self.target_critic = CriticContinuous(env).to(self.device)
-        else:  # discrete action space
-            self.actor = ActorDiscrete(env).to(self.device)
-            self.critic = CriticDiscrete(env).to(self.device)
-            self.target_actor = ActorDiscrete(env).to(self.device)
-            self.target_critic = CriticDiscrete(env).to(self.device)
+        self.actor = Actor(env).to(self.device)
+        self.critic = Critic(env).to(self.device)
+        self.target_actor = Actor(env).to(self.device)
+        self.target_critic = Critic(env).to(self.device)
 
         for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
             target_param.data.copy_(param.data)
@@ -259,67 +243,33 @@ class MPO(object):
                     # E-Step of Policy Improvement
                     # [2] 4.1 Finding action weights (Step 2)
                     with torch.no_grad():
-                        if self.continuous_action_space:
-                            # sample N actions per state
-                            b_μ, b_A = self.target_actor.forward(state_batch)  # (K,)
-                            b = MultivariateNormal(b_μ, scale_tril=b_A)  # (K,)
-                            sampled_actions = b.sample((N,))  # (N, K, da)
-                            expanded_states = state_batch[None, ...].expand(N, -1, -1)  # (N, K, ds)
-                            target_q = self.target_critic.forward(
-                                expanded_states.reshape(-1, ds),  # (N * K, ds)
-                                sampled_actions.reshape(-1, da)  # (N * K, da)
-                            ).reshape(N, K)  # (N, K)
-                            target_q_np = target_q.cpu().transpose(0, 1).numpy()  # (K, N)
-                        else:  # discrete action spaces
-                            # sample da actions per state
-                            # Because of discrete action space, we can cover the all actions per state.
-                            actions = torch.arange(da)[..., None].expand(da, K).to(self.device)  # (da, K)
-                            b_p = self.target_actor.forward(state_batch)  # (K, da)
-                            b = Categorical(probs=b_p)  # (K,)
-                            b_prob = b.expand((da, K)).log_prob(actions).exp()  # (da, K)
-                            expanded_actions = self.A_eye[None, ...].expand(K, -1, -1)  # (K, da, da)
-                            expanded_states = state_batch.reshape(K, 1, ds).expand((K, da, ds))  # (K, da, ds)
-                            target_q = (
-                                self.target_critic.forward(
-                                    expanded_states.reshape(-1, ds),  # (K * da, ds)
-                                    expanded_actions.reshape(-1, da)  # (K * da, da)
-                                ).reshape(K, da)  # (K, da)
-                            ).transpose(0, 1)  # (da, K)
-                            b_prob_np = b_prob.cpu().transpose(0, 1).numpy()  # (K, da)
-                            target_q_np = target_q.cpu().transpose(0, 1).numpy()  # (K, da)
-
+                        # sample N actions per state
+                        b_μ, b_A = self.target_actor.forward(state_batch)  # (K,)
+                        b = MultivariateNormal(b_μ, scale_tril=b_A)  # (K,)
+                        sampled_actions = b.sample((N,))  # (N, K, da)
+                        expanded_states = state_batch[None, ...].expand(N, -1, -1)  # (N, K, ds)
+                        target_q = self.target_critic.forward(
+                            expanded_states.reshape(-1, ds),  # (N * K, ds)
+                            sampled_actions.reshape(-1, da)  # (N * K, da)
+                        ).reshape(N, K)  # (N, K)
+                        target_q_np = target_q.cpu().transpose(0, 1).numpy()  # (K, N)
+                        
                     # https://arxiv.org/pdf/1812.02256.pdf
                     # [2] 4.1 Finding action weights (Step 2)
                     #   Using an exponential transformation of the Q-values
-                    if self.continuous_action_space:
-                        def dual(η):
-                            """
-                            dual function of the non-parametric variational
-                            Q = target_q_np  (K, N)
-                            g(η) = η*ε + η*mean(log(mean(exp(Q(s, a)/η), along=a)), along=s)
-                            For numerical stabilization, this can be modified to
-                            Qj = max(Q(s, a), along=a)
-                            g(η) = η*ε + mean(Qj, along=j) + η*mean(log(mean(exp((Q(s, a)-Qj)/η), along=a)), along=s)
-                            """
-                            max_q = np.max(target_q_np, 1)
-                            return η * self.ε_dual + np.mean(max_q) \
-                                + η * np.mean(np.log(np.mean(np.exp((target_q_np - max_q[:, None]) / η), axis=1)))
-                    else:  # discrete action space
-                        def dual(η):
-                            """
-                            dual function of the non-parametric variational
-                            g(η) = η*ε + η*mean(log(sum(π(a|s)*exp(Q(s, a)/η))))
-                            We have to multiply π by exp because this is expectation.
-                            This equation is correspond to last equation of the [2] p.15
-                            For numerical stabilization, this can be modified to
-                            Qj = max(Q(s, a), along=a)
-                            g(η) = η*ε + mean(Qj, along=j) + η*mean(log(sum(π(a|s)*(exp(Q(s, a)-Qj)/η))))
-                            """
-                            max_q = np.max(target_q_np, 1)
-                            return η * self.ε_dual + np.mean(max_q) \
-                                + η * np.mean(np.log(np.sum(
-                                    b_prob_np * np.exp((target_q_np - max_q[:, None]) / η), axis=1)))
-
+                    def dual(η):
+                        """
+                        dual function of the non-parametric variational
+                        Q = target_q_np  (K, N)
+                        g(η) = η*ε + η*mean(log(mean(exp(Q(s, a)/η), along=a)), along=s)
+                        For numerical stabilization, this can be modified to
+                        Qj = max(Q(s, a), along=a)
+                        g(η) = η*ε + mean(Qj, along=j) + η*mean(log(mean(exp((Q(s, a)-Qj)/η), along=a)), along=s)
+                        """
+                        max_q = np.max(target_q_np, 1)
+                        return η * self.ε_dual + np.mean(max_q) \
+                            + η * np.mean(np.log(np.mean(np.exp((target_q_np - max_q[:, None]) / η), axis=1)))
+                    
                     bounds = [(1e-6, None)]
                     res = minimize(dual, np.array([self.η]), method='SLSQP', bounds=bounds)
                     self.η = res.x[0]
@@ -330,84 +280,53 @@ class MPO(object):
                     # M-Step of Policy Improvement
                     # [2] 4.2 Fitting an improved policy (Step 3)
                     for _ in range(self.mstep_iteration_num):
-                        if self.continuous_action_space:
-                            μ, A = self.actor.forward(state_batch)
-                            # First term of last eq of [2] p.5
-                            # see also [2] 4.2.1 Fitting an improved Gaussian policy
-                            π1 = MultivariateNormal(loc=μ, scale_tril=b_A)  # (K,)
-                            π2 = MultivariateNormal(loc=b_μ, scale_tril=A)  # (K,)
-                            loss_p = torch.mean(
-                                qij * (
-                                    π1.expand((N, K)).log_prob(sampled_actions)  # (N, K)
-                                    + π2.expand((N, K)).log_prob(sampled_actions)  # (N, K)
-                                )
+                        μ, A = self.actor.forward(state_batch)
+                        # First term of last eq of [2] p.5
+                        # see also [2] 4.2.1 Fitting an improved Gaussian policy
+                        π1 = MultivariateNormal(loc=μ, scale_tril=b_A)  # (K,)
+                        π2 = MultivariateNormal(loc=b_μ, scale_tril=A)  # (K,)
+                        loss_p = torch.mean(
+                            qij * (
+                                π1.expand((N, K)).log_prob(sampled_actions)  # (N, K)
+                                + π2.expand((N, K)).log_prob(sampled_actions)  # (N, K)
                             )
-                            mean_loss_p.append((-loss_p).item())
+                        )
+                        mean_loss_p.append((-loss_p).item())
 
-                            kl_μ, kl_Σ, Σi_det, Σ_det = gaussian_kl(
-                                μi=b_μ, μ=μ,
-                                Ai=b_A, A=A)
-                            max_kl_μ.append(kl_μ.item())
-                            max_kl_Σ.append(kl_Σ.item())
-                            mean_Σ_det.append(Σ_det.item())
+                        kl_μ, kl_Σ, Σi_det, Σ_det = gaussian_kl(
+                            μi=b_μ, μ=μ,
+                            Ai=b_A, A=A)
+                        max_kl_μ.append(kl_μ.item())
+                        max_kl_Σ.append(kl_Σ.item())
+                        mean_Σ_det.append(Σ_det.item())
 
-                            if np.isnan(kl_μ.item()):  # This should not happen
-                                raise RuntimeError('kl_μ is nan')
-                            if np.isnan(kl_Σ.item()):  # This should not happen
-                                raise RuntimeError('kl_Σ is nan')
+                        if np.isnan(kl_μ.item()):  # This should not happen
+                            raise RuntimeError('kl_μ is nan')
+                        if np.isnan(kl_Σ.item()):  # This should not happen
+                            raise RuntimeError('kl_Σ is nan')
 
-                            # Update lagrange multipliers by gradient descent
-                            # this equation is derived from last eq of [2] p.5,
-                            # just differentiate with respect to α
-                            # and update α so that the equation is to be minimized.
-                            self.α_μ -= self.α_μ_scale * (self.ε_kl_μ - kl_μ).detach().item()
-                            self.α_Σ -= self.α_Σ_scale * (self.ε_kl_Σ - kl_Σ).detach().item()
+                        # Update lagrange multipliers by gradient descent
+                        # this equation is derived from last eq of [2] p.5,
+                        # just differentiate with respect to α
+                        # and update α so that the equation is to be minimized.
+                        self.α_μ -= self.α_μ_scale * (self.ε_kl_μ - kl_μ).detach().item()
+                        self.α_Σ -= self.α_Σ_scale * (self.ε_kl_Σ - kl_Σ).detach().item()
 
-                            self.α_μ = np.clip(0.0, self.α_μ, self.α_μ_max)
-                            self.α_Σ = np.clip(0.0, self.α_Σ, self.α_Σ_max)
+                        self.α_μ = np.clip(0.0, self.α_μ, self.α_μ_max)
+                        self.α_Σ = np.clip(0.0, self.α_Σ, self.α_Σ_max)
 
-                            self.actor_optimizer.zero_grad()
-                            # last eq of [2] p.5
-                            loss_l = -(
-                                    loss_p
-                                    + self.α_μ * (self.ε_kl_μ - kl_μ)
-                                    + self.α_Σ * (self.ε_kl_Σ - kl_Σ)
-                            )
-                            mean_loss_l.append(loss_l.item())
-                            loss_l.backward()
-                            clip_grad_norm_(self.actor.parameters(), 0.1)
-                            self.actor_optimizer.step()
-                        else:  # discrete action space
-                            π_p = self.actor.forward(state_batch)  # (K, da)
-                            # First term of last eq of [2] p.5
-                            π = Categorical(probs=π_p)  # (K,)
-                            loss_p = torch.mean(
-                                qij * π.expand((da, K)).log_prob(actions)
-                            )
-                            mean_loss_p.append((-loss_p).item())
-
-                            kl = categorical_kl(p1=π_p, p2=b_p)
-                            max_kl.append(kl.item())
-
-                            if np.isnan(kl.item()):  # This should not happen
-                                raise RuntimeError('kl is nan')
-
-                            # Update lagrange multipliers by gradient descent
-                            # this equation is derived from last eq of [2] p.5,
-                            # just differentiate with respect to α
-                            # and update α so that the equation is to be minimized.
-                            self.α -= self.α_scale * (self.ε_kl - kl).detach().item()
-
-                            self.α = np.clip(self.α, 0.0, self.α_max)
-
-                            self.actor_optimizer.zero_grad()
-                            # last eq of [2] p.5
-                            loss_l = -(loss_p + self.α * (self.ε_kl - kl))
-                            mean_loss_l.append(loss_l.item())
-                            loss_l.backward()
-                            clip_grad_norm_(self.actor.parameters(), 0.1)
-                            self.actor_optimizer.step()
-
+                        self.actor_optimizer.zero_grad()
+                        # last eq of [2] p.5
+                        loss_l = -(
+                                loss_p
+                                + self.α_μ * (self.ε_kl_μ - kl_μ)
+                                + self.α_Σ * (self.ε_kl_Σ - kl_Σ)
+                        )
+                        mean_loss_l.append(loss_l.item())
+                        loss_l.backward()
+                        clip_grad_norm_(self.actor.parameters(), 0.1)
+                        self.actor_optimizer.step()
+                    
             self.__update_param()
 
             return_eval = None
@@ -421,12 +340,10 @@ class MPO(object):
             mean_loss_p = np.mean(mean_loss_p)
             mean_loss_l = np.mean(mean_loss_l)
             mean_est_q = np.mean(mean_est_q)
-            if self.continuous_action_space:
-                max_kl_μ = np.max(max_kl_μ)
-                max_kl_Σ = np.max(max_kl_Σ)
-                mean_Σ_det = np.mean(mean_Σ_det)
-            else:  # discrete action space
-                max_kl = np.max(max_kl)
+
+            max_kl_μ = np.max(max_kl_μ)
+            max_kl_Σ = np.max(max_kl_Σ)
+            mean_Σ_det = np.mean(mean_Σ_det)
 
             print('iteration :', it)
             if it % self.evaluate_period == 0:
@@ -439,15 +356,11 @@ class MPO(object):
             print('  mean loss_l :', mean_loss_l)
             print('  mean est_q :', mean_est_q)
             print('  η :', self.η)
-            if self.continuous_action_space:
-                print('  max_kl_μ :', max_kl_μ)
-                print('  max_kl_Σ :', max_kl_Σ)
-                print('  mean_Σ_det :', mean_Σ_det)
-                print('  α_μ :', self.α_μ)
-                print('  α_Σ :', self.α_Σ)
-            else:  # discrete action space
-                print('  max_kl :', max_kl)
-                print('  α :', self.α)
+            print('  max_kl_μ :', max_kl_μ)
+            print('  max_kl_Σ :', max_kl_Σ)
+            print('  mean_Σ_det :', mean_Σ_det)
+            print('  α_μ :', self.α_μ)
+            print('  α_Σ :', self.α_Σ)
 
             self.save_model(os.path.join(model_save_dir, 'model_latest.pt'))
             if it % model_save_period == 0:
@@ -463,15 +376,12 @@ class MPO(object):
             writer.add_scalar('loss_l', mean_loss_l, it)
             writer.add_scalar('mean_q', mean_est_q, it)
             writer.add_scalar('η', self.η, it)
-            if self.continuous_action_space:
-                writer.add_scalar('max_kl_μ', max_kl_μ, it)
-                writer.add_scalar('max_kl_Σ', max_kl_Σ, it)
-                writer.add_scalar('mean_Σ_det', mean_Σ_det, it)
-                writer.add_scalar('α_μ', self.α_μ, it)
-                writer.add_scalar('α_Σ', self.α_Σ, it)
-            else:
-                writer.add_scalar('η_kl', max_kl, it)
-                writer.add_scalar('α', self.α, it)
+            writer.add_scalar('max_kl_μ', max_kl_μ, it)
+            writer.add_scalar('max_kl_Σ', max_kl_Σ, it)
+            writer.add_scalar('mean_Σ_det', mean_Σ_det, it)
+            writer.add_scalar('α_μ', self.α_μ, it)
+            writer.add_scalar('α_Σ', self.α_Σ, it)
+
             writer.flush()
 
         # end training
@@ -576,44 +486,22 @@ class MPO(object):
         da = self.da
         with torch.no_grad():
             r = reward_batch  # (B,)
-            if self.continuous_action_space:
-                ## get mean, cholesky from target actor --> to sample from Gaussian
-                π_μ, π_A = self.target_actor.forward(next_state_batch)  # (B,)
-                π = MultivariateNormal(π_μ, scale_tril=π_A)  # (B,)
-                sampled_next_actions = π.sample((sample_num,)).transpose(0, 1)  # (B, sample_num, da)
-                expanded_next_states = next_state_batch[:, None, :].expand(-1, sample_num, -1)  # (B, sample_num, ds)
-                
-                ## get expected Q value from target critic
-                expected_next_q = self.target_critic.forward(
-                    expanded_next_states.reshape(-1, ds),  # (B * sample_num, ds)
-                    sampled_next_actions.reshape(-1, da)  # (B * sample_num, da)
-                ).reshape(B, sample_num).mean(dim=1)  # (B,)
-            else:  # discrete action space
-                π_p = self.target_actor.forward(next_state_batch)  # (B, da)
-                π = Categorical(probs=π_p)  # (B,)
-                π_prob = π.expand((da, B)).log_prob(
-                    torch.arange(da)[..., None].expand(-1, B).to(self.device)  # (da, B)
-                ).exp().transpose(0, 1)  # (B, da)
-                sampled_next_actions = self.A_eye[None, ...].expand(B, -1, -1)  # (B, da, da)
-                expanded_next_states = next_state_batch[:, None, :].expand(-1, da, -1)  # (B, da, ds)
-                expected_next_q = (
-                    self.target_critic.forward(
-                        expanded_next_states.reshape(-1, ds),  # (B * da, ds)
-                        sampled_next_actions.reshape(-1, da)  # (B * da, da)
-                    ).reshape(B, da) * π_prob  # (B, da)
-                ).sum(dim=-1)  # (B,)
+
+            ## get mean, cholesky from target actor --> to sample from Gaussian
+            π_μ, π_A = self.target_actor.forward(next_state_batch)  # (B,)
+            π = MultivariateNormal(π_μ, scale_tril=π_A)  # (B,)
+            sampled_next_actions = π.sample((sample_num,)).transpose(0, 1)  # (B, sample_num, da)
+            expanded_next_states = next_state_batch[:, None, :].expand(-1, sample_num, -1)  # (B, sample_num, ds)
+            
+            ## get expected Q value from target critic
+            expected_next_q = self.target_critic.forward(
+                expanded_next_states.reshape(-1, ds),  # (B * sample_num, ds)
+                sampled_next_actions.reshape(-1, da)  # (B * sample_num, da)
+            ).reshape(B, sample_num).mean(dim=1)  # (B,)
+            
             y = r + self.γ * expected_next_q
         self.critic_optimizer.zero_grad()
-        if self.continuous_action_space:
-            t = self.critic(
-                state_batch,
-                action_batch
-            ).squeeze()
-        else:  # discrete action space
-            t = self.critic(
-                state_batch,
-                self.A_eye[action_batch.long()]
-            ).squeeze(-1)  # (B,)
+        t = self.critic( state_batch, action_batch).squeeze()
         loss = self.norm_loss_q(y, t)
         loss.backward()
         self.critic_optimizer.step()

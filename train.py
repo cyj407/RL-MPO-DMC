@@ -27,7 +27,7 @@ def main():
     parser.add_argument('--sample_episode_maxstep', type=int, default=300, help='maximum sample steps of an episode')
     parser.add_argument('--sample_action_num', type=int, default=64, help='number of sampled actions')
     parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--iteration_num', type=int, default=1000, help='number of iteration to learn')
+    parser.add_argument('--iteration_num', type=int, default=1, help='number of iteration to learn')
     parser.add_argument('--episode_rerun_num', type=int, default=3, help='number of reruns of sampled episode')
     parser.add_argument('--mstep_iteration_num', type=int, default=5, help='the number of iterations of the M-Step')
     parser.add_argument('--evaluate_period', type=int, default=10, help='periode of evaluation')
@@ -68,13 +68,12 @@ def main():
     if args.load is not None:
         model.load_model(args.load)
 
-    model.train(
-        iteration_num=args.iteration_num,
-        log_dir=args.log_dir,
-        render=args.render)
+    # only train in the continuous environments
+    if(env.action_space.dtype == 'float32'):
+        model.train( args.iteration_num, args.log_dir, render=args.render)
 
     env.close()
-
+    print('Finish')
 
 if __name__ == '__main__':
     main()
