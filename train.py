@@ -11,7 +11,7 @@ def main():
     parser.add_argument('--domain', type=str, default='hopper', help='gym environment')
     parser.add_argument('--task', type=str, default='stand', help='gym environment')
     
-    parser.add_argument('--device', type=str, default='cpu')
+    parser.add_argument('--device', type=str, default='cpu')    # cpu is faster!
     parser.add_argument('--dual_constraint', type=float, default=0.1, help='hard constraint of the dual formulation in the E-step')
     parser.add_argument('--kl_mean_constraint', type=float, default=0.01, help='hard constraint of the mean in the M-step')
     parser.add_argument('--kl_var_constraint', type=float, default=0.0001, help='hard constraint of the covariance in the M-step')
@@ -27,13 +27,13 @@ def main():
     parser.add_argument('--sample_episode_maxstep', type=int, default=300, help='maximum sample steps of an episode')
     parser.add_argument('--sample_action_num', type=int, default=64, help='number of sampled actions')
     parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--iteration_num', type=int, default=1, help='number of iteration to learn')
+    parser.add_argument('--iteration_num', type=int, default=1000, help='number of iteration to learn')
     parser.add_argument('--episode_rerun_num', type=int, default=3, help='number of reruns of sampled episode')
     parser.add_argument('--mstep_iteration_num', type=int, default=5, help='the number of iterations of the M-Step')
     parser.add_argument('--evaluate_period', type=int, default=10, help='periode of evaluation')
     parser.add_argument('--evaluate_episode_num', type=int, default=1, help='number of episodes to evaluate')
     parser.add_argument('--evaluate_episode_maxstep', type=int, default=300, help='maximum evaluate steps of an episode')
-    parser.add_argument('--log_dir', type=str, default="ttt", help='log directory')
+    parser.add_argument('--log_dir', type=str, default="hopper", help='log directory')
     parser.add_argument('--render', action='store_true')
     parser.add_argument('--load', type=str, default=None, help='load path')
     args = parser.parse_args()
@@ -73,7 +73,6 @@ def main():
         model.train( args.iteration_num, args.log_dir, render=args.render)
 
     env.close()
-    print('Finish')
 
 if __name__ == '__main__':
     main()

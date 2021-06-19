@@ -173,7 +173,7 @@ class MPO(object):
         self.replaybuffer = ReplayBuffer()
 
         self.max_return_eval = -np.inf
-        self.iteration = 1
+        self.start_iteration = 1
         self.render = False
 
     def train(self,
@@ -195,7 +195,7 @@ class MPO(object):
             os.makedirs(model_save_dir)
         writer = SummaryWriter(os.path.join(log_dir, 'tb'))
 
-        for it in range(self.iteration, iteration_num + 1):
+        for it in range(self.start_iteration, iteration_num + 1):
             self.__sample_trajectory(self.sample_episode_num)
             buff_sz = len(self.replaybuffer)
 
@@ -362,9 +362,9 @@ class MPO(object):
             print('  α_μ :', self.α_μ)
             print('  α_Σ :', self.α_Σ)
 
-            self.save_model(os.path.join(model_save_dir, 'model_latest.pt'))
+            self.save_model(it, os.path.join(model_save_dir, 'model_latest.pt'))
             if it % model_save_period == 0:
-                self.save_model(os.path.join(model_save_dir, 'model_{}.pt'.format(it)))
+                self.save_model(it, os.path.join(model_save_dir, 'model_{}.pt'.format(it)))
 
             if it % self.evaluate_period == 0:
                 writer.add_scalar('max_return_eval', self.max_return_eval, it)
@@ -395,7 +395,7 @@ class MPO(object):
         """
         load_path = path if path is not None else self.save_path
         checkpoint = torch.load(load_path)
-        self.iteration = checkpoint['iteration']
+        self.start_iteration = checkpoint['iteration'] + 1
         self.critic.load_state_dict(checkpoint['critic_state_dict'])
         self.target_critic.load_state_dict(checkpoint['target_critic_state_dict'])
         self.actor.load_state_dict(checkpoint['actor_state_dict'])
@@ -407,13 +407,13 @@ class MPO(object):
         self.actor.train()
         self.target_actor.train()
 
-    def save_model(self, path=None):
+    def save_model(self, it, path=None):
         """
         saves a model to a given path
         :param path: (str) file path (.pt file)
         """
         data = {
-            'iteration': self.iteration,
+            'iteration': it,
             'actor_state_dict': self.actor.state_dict(),
             'target_actor_state_dict': self.target_actor.state_dict(),
             'critic_state_dict': self.critic.state_dict(),
