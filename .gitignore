@@ -1,0 +1,15 @@
+.idea
+venv
+__pycache__
+runs
+log*
+tmp
+
+hopper/
+
+*.pyc
+*.pt
+mpo
+.vscode
+test2.py
+visual.py
