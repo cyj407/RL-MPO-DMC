@@ -10,14 +10,17 @@ from moviepy.editor import ImageSequenceClip
 
 def main():
     
+    domain_name = 'acrobot'
+    task_name = 'swingup'
+
     # pretrained actor path
-    load_path = 'hopper/model/model_700.pt'
+    load_path = '{}/model/model_700.pt'.format(domain_name)
 
     # set up the rendering window
     dm_control2gym.create_render_mode('camera0', show=True, return_pixel=True, 
                                         height=480, width=640, camera_id=0)
 
-    env = dm_control2gym.make(domain_name='hopper', task_name='stand')
+    env = dm_control2gym.make(domain_name=domain_name, task_name=task_name)
     env.seed(888)
 
     ## EXAMPLE from dm_control2gym
@@ -41,8 +44,8 @@ def main():
         if done:
             break
     
-    clip = ImageSequenceClip(videos, fps=50)
-    clip.write_gif("hopper.gif")
+    # clip = ImageSequenceClip(videos, fps=50)
+    # clip.write_gif("{}.gif".format(domain_name))
 
 if __name__ == '__main__':
     main()

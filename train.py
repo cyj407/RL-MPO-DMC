@@ -2,6 +2,8 @@ import argparse
 import gym
 from my_mpo import MPO
 import dm_control2gym
+import os
+import json
 
 
 def main():
@@ -9,8 +11,8 @@ def main():
     parser.add_argument('--device', type=str, default='cpu')    # cpu is faster!
 
     ## set up domain & task argument
-    parser.add_argument('--domain', type=str, default='acrobot', help='gym environment')
-    parser.add_argument('--task', type=str, default='swingup', help='gym environment')
+    parser.add_argument('--domain', type=str, default='hopper', help='gym environment')
+    parser.add_argument('--task', type=str, default='stand', help='gym environment')
     
     # papar parameters
     parser.add_argument('--dual_constraint', type=float, default=0.1, help='hard constraint of the dual formulation in the E-step')
@@ -32,7 +34,7 @@ def main():
     parser.add_argument('--evaluate_period', type=int, default=10, help='periode of evaluation')
     parser.add_argument('--evaluate_episode_num', type=int, default=1, help='number of episodes to evaluate')
     parser.add_argument('--evaluate_episode_maxstep', type=int, default=300, help='maximum evaluate steps of an episode')
-    parser.add_argument('--log_dir', type=str, default="acrobot", help='log directory')
+    parser.add_argument('--log_dir', type=str, default="hopper_paper", help='log directory')
     parser.add_argument('--render', action='store_true')
     parser.add_argument('--load', type=str, default=None, help='load path')
     args = parser.parse_args()
@@ -66,6 +68,12 @@ def main():
 
     # only train in the continuous environments
     if(env.action_space.dtype == 'float32'):
+
+        # write hyperparameters
+        os.mkdir(args.log_dir)
+        with open(os.path.join(args.log_dir, 'setting.txt'), 'a') as f:
+            json.dump(args.__dict__, f, indent=2)
+
         model.train( args.iteration_num, args.log_dir, render=args.render)
 
     env.close()
