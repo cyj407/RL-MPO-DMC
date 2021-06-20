@@ -28,13 +28,13 @@ def main():
     parser.add_argument('--sample_episode_maxstep', type=int, default=300, help='maximum sample steps of an episode')
     parser.add_argument('--sample_action_num', type=int, default=64, help='number of sampled actions')
     parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--iteration_num', type=int, default=1000, help='number of iteration to learn')
+    parser.add_argument('--iteration_num', type=int, default=1, help='number of iteration to learn')
     parser.add_argument('--episode_rerun_num', type=int, default=3, help='number of reruns of sampled episode')
     parser.add_argument('--mstep_iteration_num', type=int, default=5, help='the number of iterations of the M-Step')
-    parser.add_argument('--evaluate_period', type=int, default=10, help='periode of evaluation')
+    parser.add_argument('--evaluate_period', type=int, default=1, help='periode of evaluation')
     parser.add_argument('--evaluate_episode_num', type=int, default=1, help='number of episodes to evaluate')
     parser.add_argument('--evaluate_episode_maxstep', type=int, default=300, help='maximum evaluate steps of an episode')
-    parser.add_argument('--log_dir', type=str, default="hopper_paper", help='log directory')
+    parser.add_argument('--log_dir', type=str, default="ttt", help='log directory')
     parser.add_argument('--render', action='store_true')
     parser.add_argument('--load', type=str, default=None, help='load path')
     args = parser.parse_args()
@@ -42,35 +42,17 @@ def main():
     # wrap DM control suite to gym environment
     env = dm_control2gym.make(domain_name=args.domain, task_name=args.task)
 
-    model = MPO(
-        args.device,
-        env,
-        dual_constraint=args.dual_constraint,
-        kl_mean_constraint=args.kl_mean_constraint,
-        kl_var_constraint=args.kl_var_constraint,
-        discount_factor=args.discount_factor,
-        alpha_mean_scale=args.alpha_mean_scale,
-        alpha_var_scale=args.alpha_var_scale,
-        alpha_mean_max=args.alpha_mean_max,
-        alpha_var_max=args.alpha_var_max,
-        sample_episode_num=args.sample_episode_num,
-        sample_episode_maxstep=args.sample_episode_maxstep,
-        sample_action_num=args.sample_action_num,
-        batch_size=args.batch_size,
-        episode_rerun_num=args.episode_rerun_num,
-        mstep_iteration_num=args.mstep_iteration_num,
-        evaluate_period=args.evaluate_period,
-        evaluate_episode_num=args.evaluate_episode_num,
-        evaluate_episode_maxstep=args.evaluate_episode_maxstep)
-
+    model = MPO( env, args)
     if args.load is not None:
         model.load_model(args.load)
 
     # only train in the continuous environments
     if(env.action_space.dtype == 'float32'):
+        
+        if not os.path.exists(args.log_dir):
+            os.mkdir(args.log_dir)
 
         # write hyperparameters
-        os.mkdir(args.log_dir)
         with open(os.path.join(args.log_dir, 'setting.txt'), 'a') as f:
             json.dump(args.__dict__, f, indent=2)
 

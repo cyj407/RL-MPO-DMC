@@ -57,91 +57,31 @@ def gaussian_kl(μi, μ, Ai, A):
     return C_μ, C_Σ, torch.mean(Σi_det), torch.mean(Σ_det)
 
 
-def categorical_kl(p1, p2):
-    """
-    calculates KL between two Categorical distributions
-    :param p1: (B, D)
-    :param p2: (B, D)
-    """
-    p1 = torch.clamp_min(p1, 0.0001)  # actually no need to clamp
-    p2 = torch.clamp_min(p2, 0.0001)  # avoid zero division
-    return torch.mean((p1 * torch.log(p1 / p2)).sum(dim=-1))
-
-
 class MPO(object):
-    """
-    Maximum A Posteriori Policy Optimization (MPO)
-    :param device:
-    :param env: gym environment
-    :param dual_constraint:
-        (float) hard constraint of the dual formulation in the E-step
-        correspond to [2] p.4 ε
-    :param kl_mean_constraint:
-        (float) hard constraint of the mean in the M-step
-        correspond to [2] p.6 ε_μ for continuous action space
-    :param kl_var_constraint:
-        (float) hard constraint of the covariance in the M-step
-        correspond to [2] p.6 ε_Σ for continuous action space
-    :param kl_constraint:
-        (float) hard constraint in the M-step
-        correspond to [2] p.6 ε_π for discrete action space
-    :param discount_factor: (float) discount factor used in Policy Evaluation
-    :param alpha_scale: (float) scaling factor of the lagrangian multiplier in the M-step
-    :param sample_episode_num: the number of sampled episodes
-    :param sample_episode_maxstep: maximum sample steps of an episode
-    :param sample_action_num:
-    :param batch_size: (int) size of the sampled mini-batch
-    :param episode_rerun_num:
-    :param mstep_iteration_num: (int) the number of iterations of the M-step
-    :param evaluate_episode_maxstep: maximum evaluate steps of an episode
-    [1] https://arxiv.org/pdf/1806.06920.pdf
-    [2] https://arxiv.org/pdf/1812.02256.pdf
-    """
-    def __init__(self,
-                 device,
-                 env,
-                 dual_constraint=0.1,
-                 kl_mean_constraint=0.01,
-                 kl_var_constraint=0.0001,
-                 discount_factor=0.99,
-                 alpha_mean_scale=1.0,
-                 alpha_var_scale=100.0,
-                 alpha_mean_max=0.1,
-                 alpha_var_max=10.0,
-                 sample_episode_num=30,
-                 sample_episode_maxstep=200,
-                 sample_action_num=64,
-                 batch_size=256,
-                 episode_rerun_num=3,
-                 mstep_iteration_num=5,
-                 evaluate_period=10,
-                 evaluate_episode_num=100,
-                 evaluate_episode_maxstep=200):
-        self.device = device
+    def __init__(self, env, args):
         self.env = env
+        self.state_dim = env.observation_space.shape[0]
+        self.action_dim = env.action_space.shape[0]
 
-        # the number of dimensions of state space
-        self.ds = env.observation_space.shape[0]
-        # the number of dimensions of action space
-        self.da = env.action_space.shape[0]
+        self.device = args.device
+        self.ε_dual = args.dual_constraint
+        self.εμ = args.kl_mean_constraint
+        self.εΣ = args.kl_var_constraint
+        self.γ = args.discount_factor
+        self.α_μ_scale = args.alpha_mean_scale # scale Largrangian multiplier
+        self.α_Σ_scale = args.alpha_var_scale  # scale Largrangian multiplier
+        self.α_μ_max = args.alpha_mean_max
+        self.α_Σ_max = args.alpha_var_max
 
-        self.ε_dual = dual_constraint
-        self.ε_kl_μ = kl_mean_constraint
-        self.ε_kl_Σ = kl_var_constraint
-        self.γ = discount_factor
-        self.α_μ_scale = alpha_mean_scale
-        self.α_Σ_scale = alpha_var_scale
-        self.α_μ_max = alpha_mean_max
-        self.α_Σ_max = alpha_var_max
-        self.sample_episode_num = sample_episode_num
-        self.sample_episode_maxstep = sample_episode_maxstep
-        self.sample_action_num = sample_action_num
-        self.batch_size = batch_size
-        self.episode_rerun_num = episode_rerun_num
-        self.mstep_iteration_num = mstep_iteration_num
-        self.evaluate_period = evaluate_period
-        self.evaluate_episode_num = evaluate_episode_num
-        self.evaluate_episode_maxstep = evaluate_episode_maxstep
+        self.sample_episode_num = args.sample_episode_num
+        self.sample_episode_maxstep = args.sample_episode_maxstep
+        self.sample_action_num = args.sample_action_num
+        self.batch_size = args.batch_size
+        self.episode_rerun_num = args.episode_rerun_num
+        self.mstep_iteration_num = args.mstep_iteration_num
+        self.evaluate_period = args.evaluate_period
+        self.evaluate_episode_num = args.evaluate_episode_num
+        self.evaluate_episode_maxstep = args.evaluate_episode_maxstep
 
         self.actor = Actor(env).to(self.device)
         self.critic = Critic(env).to(self.device)
@@ -159,24 +99,16 @@ class MPO(object):
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=5e-4)
         self.norm_loss_q = nn.MSELoss() #nn.SmoothL1Loss()
 
-        self.η = np.random.rand()
-        self.α_μ = 0.0  # lagrangian multiplier for continuous action space in the M-step
-        self.α_Σ = 0.0  # lagrangian multiplier for continuous action space in the M-step
-        self.α = 0.0  # lagrangian multiplier for discrete action space in the M-step
-
         self.replaybuffer = ReplayBuffer()
 
+        self.η = np.random.rand()
+        self.η_μ = 0.0  # lagrangian multiplier for continuous action space in the M-step
+        self.η_Σ = 0.0  # lagrangian multiplier for continuous action space in the M-step
         self.max_return_eval = -np.inf
         self.start_iteration = 1
         self.render = False
 
     def train(self, iteration_num=1000, log_dir='log', model_save_period=50, render=False):
-        """
-        :param iteration_num:
-        :param log_dir:
-        :param model_save_period:
-        :param render:
-        """
 
         self.render = render
 
@@ -187,7 +119,7 @@ class MPO(object):
 
         for it in range(self.start_iteration, iteration_num + 1):
             self.__sample_trajectory(self.sample_episode_num)
-            buff_sz = len(self.replaybuffer)
+            buffer_size = len(self.replaybuffer)
 
             mean_reward = self.replaybuffer.mean_reward()
             mean_return = self.replaybuffer.mean_return()
@@ -202,32 +134,23 @@ class MPO(object):
 
             for r in range(self.episode_rerun_num):
                 for indices in tqdm(
-                        BatchSampler(
-                            SubsetRandomSampler(range(buff_sz)), self.batch_size, drop_last=True),
+                        BatchSampler(SubsetRandomSampler(range(buffer_size)), self.batch_size, drop_last=True),
                         desc='training {}/{}'.format(r+1, self.episode_rerun_num)):
                         
                     K = len(indices)  # the sample number of states
                     N = self.sample_action_num  # the sample number of actions per state
-                    ds = self.ds  # the number of state space dimensions
-                    da = self.da  # the number of action space dimensions
 
                     state_batch, action_batch, next_state_batch, reward_batch = zip(
                         *[self.replaybuffer[index] for index in indices])
 
-                    state_batch = torch.from_numpy(np.stack(state_batch)).type(torch.float32).to(self.device)  # (K, ds)
-                    action_batch = torch.from_numpy(np.stack(action_batch)).type(torch.float32).to(self.device)  # (K, da) or (K,)
-                    next_state_batch = torch.from_numpy(np.stack(next_state_batch)).type(torch.float32).to(self.device)  # (K, ds)
+                    state_batch = torch.from_numpy(np.stack(state_batch)).type(torch.float32).to(self.device)  # (K, state_dim)
+                    action_batch = torch.from_numpy(np.stack(action_batch)).type(torch.float32).to(self.device)  # (K, action_dim) or (K,)
+                    next_state_batch = torch.from_numpy(np.stack(next_state_batch)).type(torch.float32).to(self.device)  # (K, state_dim)
                     reward_batch = torch.from_numpy(np.stack(reward_batch)).type(torch.float32).to(self.device)  # (K,)
 
                     # Policy Evaluation
                     # [2] 3 Policy Evaluation (Step 1)
-                    loss_q, q = self.__update_critic_td(
-                        state_batch=state_batch,
-                        action_batch=action_batch,
-                        next_state_batch=next_state_batch,
-                        reward_batch=reward_batch,
-                        sample_num=self.sample_action_num
-                    )
+                    loss_q, q = self.__update_critic_td( state_batch, action_batch, next_state_batch, reward_batch, self.sample_action_num)
                     mean_loss_q.append(loss_q.item())
                     mean_est_q.append(q.abs().mean().item())
 
@@ -237,11 +160,10 @@ class MPO(object):
                         # sample N actions per state
                         b_μ, b_A = self.target_actor.forward(state_batch)  # (K,)
                         b = MultivariateNormal(b_μ, scale_tril=b_A)  # (K,)
-                        sampled_actions = b.sample((N,))  # (N, K, da)
-                        expanded_states = state_batch[None, ...].expand(N, -1, -1)  # (N, K, ds)
+                        sampled_actions = b.sample((N,))  # (N, K, action_dim)
+                        expanded_states = state_batch[None, ...].expand(N, -1, -1)  # (N, K, state_dim)
                         target_q = self.target_critic.forward(
-                            expanded_states.reshape(-1, ds),  # (N * K, ds)
-                            sampled_actions.reshape(-1, da)  # (N * K, da)
+                            expanded_states.reshape(-1, self.state_dim), sampled_actions.reshape(-1, self.action_dim)  # (N * K, action_dim)
                         ).reshape(N, K)  # (N, K)
                         target_q_np = target_q.cpu().transpose(0, 1).numpy()  # (K, N)
                         
@@ -266,7 +188,7 @@ class MPO(object):
                     self.η = res.x[0]
 
                     # normalize
-                    qij = torch.softmax(target_q / self.η, dim=0)  # (N, K) or (da, K)
+                    qij = torch.softmax(target_q / self.η, dim=0)  # (N, K) or (action_dim, K)
 
                     # M-Step of Policy Improvement
                     # [2] 4.2 Fitting an improved policy (Step 3)
@@ -284,82 +206,65 @@ class MPO(object):
                         )
                         mean_loss_p.append((-loss_p).item())
 
-                        kl_μ, kl_Σ, Σi_det, Σ_det = gaussian_kl(
-                            μi=b_μ, μ=μ,
-                            Ai=b_A, A=A)
-                        max_kl_μ.append(kl_μ.item())
-                        max_kl_Σ.append(kl_Σ.item())
+                        Cμ, CΣ, Σi_det, Σ_det = gaussian_kl( μi=b_μ, μ=μ, Ai=b_A, A=A)
+                        max_kl_μ.append(Cμ.item())
+                        max_kl_Σ.append(CΣ.item())
                         mean_Σ_det.append(Σ_det.item())
 
-                        if np.isnan(kl_μ.item()):  # This should not happen
-                            raise RuntimeError('kl_μ is nan')
-                        if np.isnan(kl_Σ.item()):  # This should not happen
-                            raise RuntimeError('kl_Σ is nan')
+                        if np.isnan(Cμ.item()):  # This should not happen
+                            raise RuntimeError('Cμ is nan')
+                        if np.isnan(CΣ.item()):  # This should not happen
+                            raise RuntimeError('CΣ is nan')
 
                         # Update lagrange multipliers by gradient descent
                         # this equation is derived from last eq of [2] p.5,
                         # just differentiate with respect to α
                         # and update α so that the equation is to be minimized.
-                        self.α_μ -= self.α_μ_scale * (self.ε_kl_μ - kl_μ).detach().item()
-                        self.α_Σ -= self.α_Σ_scale * (self.ε_kl_Σ - kl_Σ).detach().item()
+                        self.η_μ -= self.α_μ_scale * (self.εμ - Cμ).detach().item()
+                        self.η_Σ -= self.α_Σ_scale * (self.εΣ - CΣ).detach().item()
 
-                        self.α_μ = np.clip(0.0, self.α_μ, self.α_μ_max)
-                        self.α_Σ = np.clip(0.0, self.α_Σ, self.α_Σ_max)
+                        self.η_μ = np.clip(0.0, self.η_μ, self.α_μ_max)
+                        self.η_Σ = np.clip(0.0, self.η_Σ, self.α_Σ_max)
 
                         self.actor_optimizer.zero_grad()
                         # last eq of [2] p.5
-                        loss_l = -(
-                                loss_p
-                                + self.α_μ * (self.ε_kl_μ - kl_μ)
-                                + self.α_Σ * (self.ε_kl_Σ - kl_Σ)
-                        )
+                        loss_l = -( loss_p + self.η_μ * (self.εμ - Cμ) + self.η_Σ * (self.εΣ - CΣ))
                         mean_loss_l.append(loss_l.item())
                         loss_l.backward()
                         clip_grad_norm_(self.actor.parameters(), 0.1)
                         self.actor_optimizer.step()
                     
-            self.__update_param()
+            self.update_target_actor_critic()
 
-            return_eval = None
-            if it % self.evaluate_period == 0:
-                self.actor.eval()
-                return_eval = self.__evaluate()
-                self.actor.train()
-                self.max_return_eval = max(self.max_return_eval, return_eval)
+            
+            self.save_model(it, os.path.join(model_save_dir, 'model_latest.pt'))
+            if it % model_save_period == 0:
+                self.save_model(it, os.path.join(model_save_dir, 'model_{}.pt'.format(it)))
 
+            ################################### evaluate and save logs #########################################
             mean_loss_q = np.mean(mean_loss_q)
             mean_loss_p = np.mean(mean_loss_p)
             mean_loss_l = np.mean(mean_loss_l)
             mean_est_q = np.mean(mean_est_q)
-
             max_kl_μ = np.max(max_kl_μ)
             max_kl_Σ = np.max(max_kl_Σ)
             mean_Σ_det = np.mean(mean_Σ_det)
 
             print('iteration :', it)
             if it % self.evaluate_period == 0:
+                self.actor.eval()
+                return_eval = self.__evaluate()
+                self.actor.train()
+                self.max_return_eval = max(self.max_return_eval, return_eval)
                 print('  max_return_eval :', self.max_return_eval)
                 print('  return_eval :', return_eval)
+                writer.add_scalar('max_return_eval', self.max_return_eval, it)
+                writer.add_scalar('return_eval', return_eval, it)
             print('  mean return :', mean_return)
             print('  mean reward :', mean_reward)
             print('  mean loss_q :', mean_loss_q)
             print('  mean loss_p :', mean_loss_p)
             print('  mean loss_l :', mean_loss_l)
-            print('  mean est_q :', mean_est_q)
-            print('  η :', self.η)
-            print('  max_kl_μ :', max_kl_μ)
-            print('  max_kl_Σ :', max_kl_Σ)
-            print('  mean_Σ_det :', mean_Σ_det)
-            print('  α_μ :', self.α_μ)
-            print('  α_Σ :', self.α_Σ)
-
-            self.save_model(it, os.path.join(model_save_dir, 'model_latest.pt'))
-            if it % model_save_period == 0:
-                self.save_model(it, os.path.join(model_save_dir, 'model_{}.pt'.format(it)))
-
-            if it % self.evaluate_period == 0:
-                writer.add_scalar('max_return_eval', self.max_return_eval, it)
-                writer.add_scalar('return_eval', return_eval, it)
             writer.add_scalar('mean_return', mean_return, it)
             writer.add_scalar('mean_reward', mean_reward, it)
             writer.add_scalar('loss_q', mean_loss_q, it)
@@ -370,8 +275,8 @@ class MPO(object):
             writer.add_scalar('max_kl_μ', max_kl_μ, it)
             writer.add_scalar('max_kl_Σ', max_kl_Σ, it)
             writer.add_scalar('mean_Σ_det', mean_Σ_det, it)
-            writer.add_scalar('α_μ', self.α_μ, it)
-            writer.add_scalar('α_Σ', self.α_Σ, it)
+            writer.add_scalar('α_μ', self.η_μ, it)
+            writer.add_scalar('α_Σ', self.η_Σ, it)
 
             writer.flush()
 
@@ -380,10 +285,6 @@ class MPO(object):
             writer.close()
 
     def load_model(self, path=None):
-        """
-        loads a model from a given path
-        :param path: (str) file path (.pt file)
-        """
         load_path = path if path is not None else self.save_path
         checkpoint = torch.load(load_path)
         self.start_iteration = checkpoint['iteration'] + 1
@@ -399,10 +300,6 @@ class MPO(object):
         self.target_actor.train()
 
     def save_model(self, it, path=None):
-        """
-        saves a model to a given path
-        :param path: (str) file path (.pt file)
-        """
         data = {
             'iteration': it,
             'actor_state_dict': self.actor.state_dict(),
@@ -418,9 +315,7 @@ class MPO(object):
         buff = []
         state = self.env.reset()
         for steps in range(self.sample_episode_maxstep):
-            action = self.target_actor.action(
-                torch.from_numpy(state).type(torch.float32).to(self.device)
-            ).cpu().numpy()
+            action = self.target_actor.action( torch.from_numpy(state).type(torch.float32).to(self.device)).cpu().numpy()
             next_state, reward, done, _ = self.env.step(action)
             buff.append((state, action, next_state, reward))
             if self.render and i == 0:
@@ -439,9 +334,6 @@ class MPO(object):
         self.replaybuffer.store_episodes(episodes)
 
     def __evaluate(self):
-        """
-        :return: average return over 100 consecutive episodes
-        """
         with torch.no_grad():
             total_rewards = []
             for e in tqdm(range(self.evaluate_episode_num), desc='evaluating'):
@@ -458,36 +350,22 @@ class MPO(object):
                 total_rewards.append(total_reward)
             return np.mean(total_rewards)
 
-    def __update_critic_td(self,
-                           state_batch,
-                           action_batch,
-                           next_state_batch,
-                           reward_batch,
-                           sample_num=64):
-        """
-        :param state_batch: (B, ds)
-        :param action_batch: (B, da) or (B,)
-        :param next_state_batch: (B, ds)
-        :param reward_batch: (B,)
-        :param sample_num:
-        :return:
-        """
+
+    def __update_critic_td(self, state_batch, action_batch, next_state_batch, reward_batch, sample_num=64):
         B = state_batch.size(0)
-        ds = self.ds
-        da = self.da
         with torch.no_grad():
             r = reward_batch  # (B,)
 
             ## get mean, cholesky from target actor --> to sample from Gaussian
             π_μ, π_A = self.target_actor.forward(next_state_batch)  # (B,)
             π = MultivariateNormal(π_μ, scale_tril=π_A)  # (B,)
-            sampled_next_actions = π.sample((sample_num,)).transpose(0, 1)  # (B, sample_num, da)
-            expanded_next_states = next_state_batch[:, None, :].expand(-1, sample_num, -1)  # (B, sample_num, ds)
+            sampled_next_actions = π.sample((sample_num,)).transpose(0, 1)  # (B, sample_num, action_dim)
+            expanded_next_states = next_state_batch[:, None, :].expand(-1, sample_num, -1)  # (B, sample_num, state_dim)
             
             ## get expected Q value from target critic
             expected_next_q = self.target_critic.forward(
-                expanded_next_states.reshape(-1, ds),  # (B * sample_num, ds)
-                sampled_next_actions.reshape(-1, da)  # (B * sample_num, da)
+                expanded_next_states.reshape(-1, self.state_dim),  # (B * sample_num, state_dim)
+                sampled_next_actions.reshape(-1, self.action_dim)  # (B * sample_num, action_dim)
             ).reshape(B, sample_num).mean(dim=1)  # (B,)
             
             y = r + self.γ * expected_next_q
@@ -498,13 +376,11 @@ class MPO(object):
         self.critic_optimizer.step()
         return loss, y
 
-    def __update_param(self):
-        """
-        Sets target parameters to trained parameter
-        """
-        # Update policy parameters
+    def update_target_actor_critic(self):
+        # param(target_actor) <-- param(actor)
         for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
             target_param.data.copy_(param.data)
-        # Update critic parameters
+
+        # param(target_critic) <-- param(critic)
         for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
             target_param.data.copy_(param.data)
