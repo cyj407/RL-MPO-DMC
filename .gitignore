@@ -5,7 +5,8 @@ runs
 log*
 tmp
 
-hopper/
+hopper*
+acrobot*
 *.gif
 
 *.pyc

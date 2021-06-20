@@ -103,14 +103,14 @@ class MPO(object):
                  dual_constraint=0.1,
                  kl_mean_constraint=0.01,
                  kl_var_constraint=0.0001,
-                 kl_constraint=0.01,
+                #  kl_constraint=0.01,
                  discount_factor=0.99,
                  alpha_mean_scale=1.0,
                  alpha_var_scale=100.0,
-                 alpha_scale=10.0,
+                #  alpha_scale=10.0,
                  alpha_mean_max=0.1,
                  alpha_var_max=10.0,
-                 alpha_max=1.0,
+                #  alpha_max=1.0,
                  sample_episode_num=30,
                  sample_episode_maxstep=200,
                  sample_action_num=64,
@@ -131,14 +131,14 @@ class MPO(object):
         self.ε_dual = dual_constraint
         self.ε_kl_μ = kl_mean_constraint
         self.ε_kl_Σ = kl_var_constraint
-        self.ε_kl = kl_constraint
+        # self.ε_kl = kl_constraint
         self.γ = discount_factor
         self.α_μ_scale = alpha_mean_scale
         self.α_Σ_scale = alpha_var_scale
-        self.α_scale = alpha_scale
+        # self.α_scale = alpha_scale
         self.α_μ_max = alpha_mean_max
         self.α_Σ_max = alpha_var_max
-        self.α_max = alpha_max
+        # self.α_max = alpha_max
         self.sample_episode_num = sample_episode_num
         self.sample_episode_maxstep = sample_episode_maxstep
         self.sample_action_num = sample_action_num
@@ -161,8 +161,8 @@ class MPO(object):
             target_param.data.copy_(param.data)
             target_param.requires_grad = False
 
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=3e-4)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=3e-4)
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=5e-4)
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=5e-4)
         self.norm_loss_q = nn.SmoothL1Loss()
 
         self.η = np.random.rand()
@@ -211,6 +211,7 @@ class MPO(object):
                         BatchSampler(
                             SubsetRandomSampler(range(buff_sz)), self.batch_size, drop_last=True),
                         desc='training {}/{}'.format(r+1, self.episode_rerun_num)):
+                        
                     K = len(indices)  # the sample number of states
                     N = self.sample_action_num  # the sample number of actions per state
                     ds = self.ds  # the number of state space dimensions
