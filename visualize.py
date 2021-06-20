@@ -18,7 +18,7 @@ def main():
                                         height=480, width=640, camera_id=0)
 
     env = dm_control2gym.make(domain_name='hopper', task_name='stand')
-    env.seed(666)
+    env.seed(888)
 
     ## EXAMPLE from dm_control2gym
     # env.reset()
@@ -29,6 +29,7 @@ def main():
     actor = Actor(env)
     checkpoint = torch.load(load_path)
     actor.load_state_dict(checkpoint['actor_state_dict'])
+    actor.eval()
 
     videos = []
     state = env.reset()
