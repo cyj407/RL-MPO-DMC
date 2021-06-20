@@ -6,10 +6,10 @@ log*
 tmp
 
 hopper/
+*.gif
 
 *.pyc
 *.pt
 mpo*
 .vscode
 test2.py
-visual.py

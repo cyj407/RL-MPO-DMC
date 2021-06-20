@@ -176,11 +176,7 @@ class MPO(object):
         self.start_iteration = 1
         self.render = False
 
-    def train(self,
-              iteration_num=1000,
-              log_dir='log',
-              model_save_period=10,
-              render=False):
+    def train(self, iteration_num=1000, log_dir='log', model_save_period=10, render=False):
         """
         :param iteration_num:
         :param log_dir:
@@ -433,7 +429,7 @@ class MPO(object):
             next_state, reward, done, _ = self.env.step(action)
             buff.append((state, action, next_state, reward))
             if self.render and i == 0:
-                self.env.render()
+                self.env.render(mode='human')
                 sleep(0.01)
             if done:
                 break

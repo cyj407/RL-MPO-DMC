@@ -33,7 +33,7 @@ def main():
     parser.add_argument('--evaluate_period', type=int, default=10, help='periode of evaluation')
     parser.add_argument('--evaluate_episode_num', type=int, default=1, help='number of episodes to evaluate')
     parser.add_argument('--evaluate_episode_maxstep', type=int, default=300, help='maximum evaluate steps of an episode')
-    parser.add_argument('--log_dir', type=str, default="hopper", help='log directory')
+    parser.add_argument('--log_dir', type=str, default="ttt", help='log directory')
     parser.add_argument('--render', action='store_true')
     parser.add_argument('--load', type=str, default=None, help='load path')
     args = parser.parse_args()
