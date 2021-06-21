@@ -175,12 +175,12 @@ class MPO(object):
                         g(η) = η*ε + mean(Qj, along=j) + η*mean(log(mean(exp((Q(s, a)-Qj)/η), along=a)), along=s)
                         """
                         ## paper version
-                        # return η * self.ε_dual + η * np.mean(np.log(np.mean(np.exp(target_q_np / η), axis=1)))
+                        return η * self.ε_dual + η * np.mean(np.log(np.mean(np.exp(target_q_np / η), axis=1)))
 
                         ## stabilization version
-                        max_q = np.max(target_q_np, 1)
-                        return η * self.ε_dual + np.mean(max_q) \
-                            + η * np.mean(np.log(np.mean(np.exp((target_q_np - max_q[:, None]) / η), axis=1)))
+                        # max_q = np.max(target_q_np, 1)
+                        # return η * self.ε_dual + np.mean(max_q) \
+                        #     + η * np.mean(np.log(np.mean(np.exp((target_q_np - max_q[:, None]) / η), axis=1)))
                     
                     res = minimize(dual, np.array([self.η]), method='SLSQP', bounds=[(1e-6, None)])
                     self.η = res.x[0]
@@ -195,7 +195,7 @@ class MPO(object):
                         # paper1 version
                         π = MultivariateNormal(loc=μ, scale_tril=A)  # (K,)
                         loss_p = torch.mean( qij * π.expand((N, K)).log_prob(sampled_actions))  # (N, K)
-                        Cμ, CΣ, Σi_det, Σ_det = gaussian_kl( μi=μ, μ=μ, Ai=A, A=A)
+                        Cμ, CΣ, Σi_det, Σ_det = gaussian_kl( μi=b_μ, μ=μ, Ai=b_A, A=A)
 
                         # paper2 version normalize
                         # π1 = MultivariateNormal(loc=μ, scale_tril=b_A)  # (K,)
