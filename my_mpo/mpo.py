@@ -95,9 +95,9 @@ class MPO(object):
             target_param.data.copy_(param.data)
             target_param.requires_grad = False
 
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=5e-4)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=5e-4)
-        self.norm_loss_q = nn.MSELoss() #nn.SmoothL1Loss()
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=3e-4)
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=3e-4)
+        self.norm_loss_q = nn.MSELoss() if args.q_loss_type == 'mse' else nn.SmoothL1Loss()
 
         self.replaybuffer = ReplayBuffer()
 
@@ -149,13 +149,11 @@ class MPO(object):
                     reward_batch = torch.from_numpy(np.stack(reward_batch)).type(torch.float32).to(self.device)  # (K,)
 
                     # Policy Evaluation
-                    # [2] 3 Policy Evaluation (Step 1)
                     loss_q, q = self.__update_critic_td( state_batch, action_batch, next_state_batch, reward_batch, self.sample_action_num)
                     mean_loss_q.append(loss_q.item())
                     mean_est_q.append(q.abs().mean().item())
 
                     # E-Step of Policy Improvement
-                    # [2] 4.1 Finding action weights (Step 2)
                     with torch.no_grad():
                         # sample N actions per state
                         b_μ, b_A = self.target_actor.forward(state_batch)  # (K,)
@@ -164,12 +162,9 @@ class MPO(object):
                         expanded_states = state_batch[None, ...].expand(N, -1, -1)  # (N, K, state_dim)
                         target_q = self.target_critic.forward(
                             expanded_states.reshape(-1, self.state_dim), sampled_actions.reshape(-1, self.action_dim)  # (N * K, action_dim)
-                        ).reshape(N, K)  # (N, K)
+                        ).reshape(N, K)
                         target_q_np = target_q.cpu().transpose(0, 1).numpy()  # (K, N)
                         
-                    # https://arxiv.org/pdf/1812.02256.pdf
-                    # [2] 4.1 Finding action weights (Step 2)
-                    #   Using an exponential transformation of the Q-values
                     def dual(η):
                         """
                         dual function of the non-parametric variational
@@ -179,47 +174,46 @@ class MPO(object):
                         Qj = max(Q(s, a), along=a)
                         g(η) = η*ε + mean(Qj, along=j) + η*mean(log(mean(exp((Q(s, a)-Qj)/η), along=a)), along=s)
                         """
+                        ## paper version
+                        # return η * self.ε_dual + η * np.mean(np.log(np.mean(np.exp(target_q_np / η), axis=1)))
+
+                        ## stabilization version
                         max_q = np.max(target_q_np, 1)
                         return η * self.ε_dual + np.mean(max_q) \
                             + η * np.mean(np.log(np.mean(np.exp((target_q_np - max_q[:, None]) / η), axis=1)))
                     
-                    bounds = [(1e-6, None)]
-                    res = minimize(dual, np.array([self.η]), method='SLSQP', bounds=bounds)
+                    res = minimize(dual, np.array([self.η]), method='SLSQP', bounds=[(1e-6, None)])
                     self.η = res.x[0]
 
                     # normalize
                     qij = torch.softmax(target_q / self.η, dim=0)  # (N, K) or (action_dim, K)
 
                     # M-Step of Policy Improvement
-                    # [2] 4.2 Fitting an improved policy (Step 3)
                     for _ in range(self.mstep_iteration_num):
                         μ, A = self.actor.forward(state_batch)
-                        # First term of last eq of [2] p.5
-                        # see also [2] 4.2.1 Fitting an improved Gaussian policy
-                        π1 = MultivariateNormal(loc=μ, scale_tril=b_A)  # (K,)
-                        π2 = MultivariateNormal(loc=b_μ, scale_tril=A)  # (K,)
-                        loss_p = torch.mean(
-                            qij * (
-                                π1.expand((N, K)).log_prob(sampled_actions)  # (N, K)
-                                + π2.expand((N, K)).log_prob(sampled_actions)  # (N, K)
-                            )
-                        )
-                        mean_loss_p.append((-loss_p).item())
 
-                        Cμ, CΣ, Σi_det, Σ_det = gaussian_kl( μi=b_μ, μ=μ, Ai=b_A, A=A)
+                        # paper1 version
+                        π = MultivariateNormal(loc=μ, scale_tril=A)  # (K,)
+                        loss_p = torch.mean( qij * π.expand((N, K)).log_prob(sampled_actions))  # (N, K)
+                        Cμ, CΣ, Σi_det, Σ_det = gaussian_kl( μi=μ, μ=μ, Ai=A, A=A)
+
+                        # paper2 version normalize
+                        # π1 = MultivariateNormal(loc=μ, scale_tril=b_A)  # (K,)
+                        # π2 = MultivariateNormal(loc=b_μ, scale_tril=A)  # (K,)
+                        # loss_p = torch.mean(
+                        #     qij * (
+                        #         π1.expand((N, K)).log_prob(sampled_actions)  # (N, K)
+                        #         + π2.expand((N, K)).log_prob(sampled_actions)  # (N, K)
+                        #     )
+                        # )
+                        # Cμ, CΣ, Σi_det, Σ_det = gaussian_kl( μi=b_μ, μ=μ, Ai=b_A, A=A)
+                        
+                        mean_loss_p.append((-loss_p).item())
                         max_kl_μ.append(Cμ.item())
                         max_kl_Σ.append(CΣ.item())
                         mean_Σ_det.append(Σ_det.item())
 
-                        if np.isnan(Cμ.item()):  # This should not happen
-                            raise RuntimeError('Cμ is nan')
-                        if np.isnan(CΣ.item()):  # This should not happen
-                            raise RuntimeError('CΣ is nan')
-
                         # Update lagrange multipliers by gradient descent
-                        # this equation is derived from last eq of [2] p.5,
-                        # just differentiate with respect to α
-                        # and update α so that the equation is to be minimized.
                         self.η_μ -= self.α_μ_scale * (self.εμ - Cμ).detach().item()
                         self.η_Σ -= self.α_Σ_scale * (self.εΣ - CΣ).detach().item()
 
@@ -227,7 +221,6 @@ class MPO(object):
                         self.η_Σ = np.clip(0.0, self.η_Σ, self.α_Σ_max)
 
                         self.actor_optimizer.zero_grad()
-                        # last eq of [2] p.5
                         loss_l = -( loss_p + self.η_μ * (self.εμ - Cμ) + self.η_Σ * (self.εΣ - CΣ))
                         mean_loss_l.append(loss_l.item())
                         loss_l.backward()
@@ -354,7 +347,6 @@ class MPO(object):
     def __update_critic_td(self, state_batch, action_batch, next_state_batch, reward_batch, sample_num=64):
         B = state_batch.size(0)
         with torch.no_grad():
-            r = reward_batch  # (B,)
 
             ## get mean, cholesky from target actor --> to sample from Gaussian
             π_μ, π_A = self.target_actor.forward(next_state_batch)  # (B,)
@@ -368,7 +360,7 @@ class MPO(object):
                 sampled_next_actions.reshape(-1, self.action_dim)  # (B * sample_num, action_dim)
             ).reshape(B, sample_num).mean(dim=1)  # (B,)
             
-            y = r + self.γ * expected_next_q
+            y = reward_batch + self.γ * expected_next_q
         self.critic_optimizer.zero_grad()
         t = self.critic( state_batch, action_batch).squeeze()
         loss = self.norm_loss_q(y, t)
