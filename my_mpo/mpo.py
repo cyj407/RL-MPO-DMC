@@ -166,27 +166,19 @@ class MPO(object):
                         target_q_np = target_q.cpu().transpose(0, 1).numpy()  # (K, N)
                         
                     def dual(η):
-                        """
-                        dual function of the non-parametric variational
-                        Q = target_q_np  (K, N)
-                        g(η) = η*ε + η*mean(log(mean(exp(Q(s, a)/η), along=a)), along=s)
-                        For numerical stabilization, this can be modified to
-                        Qj = max(Q(s, a), along=a)
-                        g(η) = η*ε + mean(Qj, along=j) + η*mean(log(mean(exp((Q(s, a)-Qj)/η), along=a)), along=s)
-                        """
                         ## paper version
-                        return η * self.ε_dual + η * np.mean(np.log(np.mean(np.exp(target_q_np / η), axis=1)))
+                        # return η * self.ε_dual + η * np.mean(np.log(np.mean(np.exp(target_q_np / η), axis=1)))
 
-                        ## stabilization version
-                        # max_q = np.max(target_q_np, 1)
-                        # return η * self.ε_dual + np.mean(max_q) \
-                        #     + η * np.mean(np.log(np.mean(np.exp((target_q_np - max_q[:, None]) / η), axis=1)))
+                        ## stabilization version: move out max Q(s, a) to avoid overflow
+                        max_q = np.max(target_q_np, 1)
+                        return η * self.ε_dual + np.mean(max_q) \
+                            + η * np.mean(np.log(np.mean(np.exp((target_q_np - max_q[:, None]) / η), axis=1)))
                     
                     res = minimize(dual, np.array([self.η]), method='SLSQP', bounds=[(1e-6, None)])
                     self.η = res.x[0]
 
                     # normalize
-                    qij = torch.softmax(target_q / self.η, dim=0)  # (N, K) or (action_dim, K)
+                    norm_target_q = torch.softmax(target_q / self.η, dim=0)  # (N, K) or (action_dim, K)
 
                     # M-Step of Policy Improvement
                     for _ in range(self.mstep_iteration_num):
@@ -194,14 +186,14 @@ class MPO(object):
 
                         # paper1 version
                         π = MultivariateNormal(loc=μ, scale_tril=A)  # (K,)
-                        loss_p = torch.mean( qij * π.expand((N, K)).log_prob(sampled_actions))  # (N, K)
+                        loss_p = torch.mean( norm_target_q * π.expand((N, K)).log_prob(sampled_actions))  # (N, K)
                         Cμ, CΣ, Σi_det, Σ_det = gaussian_kl( μi=b_μ, μ=μ, Ai=b_A, A=A)
 
                         # paper2 version normalize
                         # π1 = MultivariateNormal(loc=μ, scale_tril=b_A)  # (K,)
                         # π2 = MultivariateNormal(loc=b_μ, scale_tril=A)  # (K,)
                         # loss_p = torch.mean(
-                        #     qij * (
+                        #     norm_target_q * (
                         #         π1.expand((N, K)).log_prob(sampled_actions)  # (N, K)
                         #         + π2.expand((N, K)).log_prob(sampled_actions)  # (N, K)
                         #     )
