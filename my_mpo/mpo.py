@@ -174,8 +174,8 @@ class MPO(object):
                     # E-Step of Policy Improvement
                     with torch.no_grad():
                         # sample N actions per state
-                        b_μ, b_A = self.target_actor.forward(state_batch)  # (K,)
-                        b = MultivariateNormal(b_μ, scale_tril=b_A)  # (K,)
+                        b_mu, b_A = self.target_actor.forward(state_batch)  # (K,)
+                        b = MultivariateNormal(b_mu, scale_tril=b_A)  # (K,)
                         sampled_actions = b.sample((N,))  # (N, K, action_dim)
                         expanded_states = state_batch[None, ...].expand(N, -1, -1)  # (N, K, state_dim)
                         target_q = self.target_critic.forward(
@@ -205,18 +205,18 @@ class MPO(object):
                         # paper1 version
                         policy = MultivariateNormal(loc=mu, scale_tril=A)  # (K,)
                         loss_p = torch.mean( norm_target_q * policy.expand((N, K)).log_prob(sampled_actions))  # (N, K)
-                        C_mu, C_sigma, sigma_i_det, sigma_det = gaussian_kl( mu_i=b_μ, mu=mu, Ai=b_A, A=A)
+                        C_mu, C_sigma, sigma_i_det, sigma_det = gaussian_kl( mu_i=b_mu, mu=mu, Ai=b_A, A=A)
 
                         # paper2 version normalize
                         # π1 = MultivariateNormal(loc=mu, scale_tril=b_A)  # (K,)
-                        # π2 = MultivariateNormal(loc=b_μ, scale_tril=A)  # (K,)
+                        # π2 = MultivariateNormal(loc=b_mu, scale_tril=A)  # (K,)
                         # loss_p = torch.mean(
                         #     norm_target_q * (
                         #         π1.expand((N, K)).log_prob(sampled_actions)  # (N, K)
                         #         + π2.expand((N, K)).log_prob(sampled_actions)  # (N, K)
                         #     )
                         # )
-                        # C_mu, C_sigma, sigma_i_det, sigma_det = gaussian_kl( mu_i=b_μ, mu=mu, Ai=b_A, A=A)
+                        # C_mu, C_sigma, sigma_i_det, sigma_det = gaussian_kl( mu_i=b_mu, mu=mu, Ai=b_A, A=A)
                         
                         mean_loss_p.append((-loss_p).item())
                         max_kl_mu.append(C_mu.item())
