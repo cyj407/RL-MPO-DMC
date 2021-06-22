@@ -15,46 +15,42 @@ from my_mpo.critic import Critic
 from my_mpo.replaybuffer import ReplayBuffer
 
 
-def bt(m):
-    return m.transpose(dim0=-2, dim1=-1)
-
-
 def btr(m):
     return m.diagonal(dim1=-2, dim2=-1).sum(-1)
 
+def bt(m):
+    return m.transpose(dim0=-2, dim1=-1)
 
-def gaussian_kl(μi, μ, Ai, A):
+def gaussian_kl(mu_i, mu, Ai, A):
     """
     decoupled KL between two multivariate gaussian distribution
-    C_μ = KL(f(x|μi,Σi)||f(x|μ,Σi))
-    C_Σ = KL(f(x|μi,Σi)||f(x|μi,Σ))
-    :param μi: (B, n)
-    :param μ: (B, n)
+    C_mu = KL(f(x|mu_i,sigma_i)||f(x|mu,sigma_i))
+    C_sigma = KL(f(x|mu_i,sigma_i)||f(x|mu_i,sigma))
+    :param mu_i: (B, n)
+    :param mu: (B, n)
     :param Ai: (B, n, n)
     :param A: (B, n, n)
-    :return: C_μ, C_Σ: scalar
+    :return: C_mu, C_sigma: scalar
         mean and covariance terms of the KL
-    :return: mean of determinanats of Σi, Σ
-    ref : https://stanford.edu/~jduchi/projects/general_notes.pdf page.13
+    :return: mean of determinanats of sigma_i, sigma
     """
     n = A.size(-1)
-    μi = μi.unsqueeze(-1)  # (B, n, 1)
-    μ = μ.unsqueeze(-1)  # (B, n, 1)
-    Σi = Ai @ bt(Ai)  # (B, n, n)
-    Σ = A @ bt(A)  # (B, n, n)
-    Σi_det = Σi.det()  # (B,)
-    Σ_det = Σ.det()  # (B,)
-    # determinant can be minus due to numerical calculation error
-    # https://github.com/daisatojp/mpo/issues/11
-    Σi_det = torch.clamp_min(Σi_det, 1e-6)
-    Σ_det = torch.clamp_min(Σ_det, 1e-6)
-    Σi_inv = Σi.inverse()  # (B, n, n)
-    Σ_inv = Σ.inverse()  # (B, n, n)
-    inner_μ = ((μ - μi).transpose(-2, -1) @ Σi_inv @ (μ - μi)).squeeze()  # (B,)
-    inner_Σ = torch.log(Σ_det / Σi_det) - n + btr(Σ_inv @ Σi)  # (B,)
-    C_μ = 0.5 * torch.mean(inner_μ)
-    C_Σ = 0.5 * torch.mean(inner_Σ)
-    return C_μ, C_Σ, torch.mean(Σi_det), torch.mean(Σ_det)
+    mu_i = mu_i.unsqueeze(-1)  # (B, n, 1)
+    mu = mu.unsqueeze(-1)  # (B, n, 1)
+    sigma_i = Ai @ bt(Ai)  # (B, n, n)
+    sigma = A @ bt(A)  # (B, n, n)
+    sigma_i_det = sigma_i.det()  # (B,)
+    sigma_det = sigma.det()  # (B,)
+    sigma_i_det = torch.clamp_min(sigma_i_det, 1e-6)
+    sigma_det = torch.clamp_min(sigma_det, 1e-6)
+    sigma_i_inv = sigma_i.inverse()  # (B, n, n)
+    sigma_inv = sigma.inverse()  # (B, n, n)
+
+    inner_mu = ((mu - mu_i).transpose(-2, -1) @ sigma_i_inv @ (mu - mu_i)).squeeze()  # (B,)
+    inner_sigma = torch.log(sigma_det / sigma_i_det) - n + btr(sigma_inv @ sigma_i)  # (B,)
+    C_mu = 0.5 * torch.mean(inner_mu)
+    C_sigma = 0.5 * torch.mean(inner_sigma)
+    return C_mu, C_sigma, torch.mean(sigma_i_det), torch.mean(sigma_det)
 
 
 class MPO(object):
@@ -64,14 +60,14 @@ class MPO(object):
         self.action_dim = env.action_space.shape[0]
 
         self.device = args.device
-        self.ε_dual = args.dual_constraint
-        self.εμ = args.kl_mean_constraint
-        self.εΣ = args.kl_var_constraint
-        self.γ = args.discount_factor
-        self.α_μ_scale = args.alpha_mean_scale # scale Largrangian multiplier
-        self.α_Σ_scale = args.alpha_var_scale  # scale Largrangian multiplier
-        self.α_μ_max = args.alpha_mean_max
-        self.α_Σ_max = args.alpha_var_max
+        self.eps_daul = args.dual_constraint
+        self.eps_mu = args.kl_mean_constraint
+        self.eps_gamma = args.kl_var_constraint
+        self.gamma = args.discount_factor
+        self.alpha_mu_scale = args.alpha_mean_scale # scale Largrangian multiplier
+        self.alpha_sigma_scale = args.alpha_var_scale  # scale Largrangian multiplier
+        self.alpha_mu_max = args.alpha_mean_max
+        self.alpha_sigma_max = args.alpha_var_max
 
         self.sample_episode_num = args.sample_episode_num
         self.sample_episode_maxstep = args.sample_episode_maxstep
@@ -101,12 +97,34 @@ class MPO(object):
 
         self.replaybuffer = ReplayBuffer()
 
-        self.η = np.random.rand()
-        self.η_μ = 0.0  # lagrangian multiplier for continuous action space in the M-step
-        self.η_Σ = 0.0  # lagrangian multiplier for continuous action space in the M-step
+        self.eta = np.random.rand()
+        self.eta_mu = 0.0  # lagrangian multiplier for continuous action space in the M-step
+        self.eta_sigma = 0.0  # lagrangian multiplier for continuous action space in the M-step
         self.max_return_eval = -np.inf
         self.start_iteration = 1
         self.render = False
+
+    def __sample_trajectory_worker(self, i):
+        buff = []
+        state = self.env.reset()
+        for steps in range(self.sample_episode_maxstep):
+            action = self.target_actor.action( torch.from_numpy(state).type(torch.float32).to(self.device)).cpu().numpy()
+            next_state, reward, done, _ = self.env.step(action)
+            buff.append((state, action, next_state, reward))
+            if self.render and i == 0:
+                self.env.render(mode='human')
+                sleep(0.01)
+            if done:
+                break
+            else:
+                state = next_state
+        return buff
+
+    def sample_trajectory(self, sample_episode_num):
+        self.replaybuffer.clear()
+        episodes = [self.__sample_trajectory_worker(i)
+                    for i in tqdm(range(sample_episode_num), desc='sample_trajectory')]
+        self.replaybuffer.store_episodes(episodes)
 
     def train(self, iteration_num=1000, log_dir='log', model_save_period=50, render=False):
 
@@ -118,7 +136,7 @@ class MPO(object):
         writer = SummaryWriter(os.path.join(log_dir, 'tb'))
 
         for it in range(self.start_iteration, iteration_num + 1):
-            self.__sample_trajectory(self.sample_episode_num)
+            self.sample_trajectory(self.sample_episode_num)
             buffer_size = len(self.replaybuffer)
 
             mean_reward = self.replaybuffer.mean_reward()
@@ -127,10 +145,10 @@ class MPO(object):
             mean_loss_p = []
             mean_loss_l = []
             mean_est_q = []
-            max_kl_μ = []
-            max_kl_Σ = []
+            max_kl_mu = []
+            max_kl_sigma = []
             max_kl = []
-            mean_Σ_det = []
+            mean_sigma_det = []
 
             for r in range(self.episode_rerun_num):
                 for indices in tqdm(
@@ -149,7 +167,7 @@ class MPO(object):
                     reward_batch = torch.from_numpy(np.stack(reward_batch)).type(torch.float32).to(self.device)  # (K,)
 
                     # Policy Evaluation
-                    loss_q, q = self.__update_critic_td( state_batch, action_batch, next_state_batch, reward_batch, self.sample_action_num)
+                    loss_q, q = self.critic_update_td( state_batch, action_batch, next_state_batch, reward_batch, self.sample_action_num)
                     mean_loss_q.append(loss_q.item())
                     mean_est_q.append(q.abs().mean().item())
 
@@ -165,32 +183,32 @@ class MPO(object):
                         ).reshape(N, K)
                         target_q_np = target_q.cpu().transpose(0, 1).numpy()  # (K, N)
                         
-                    def dual(η):
+                    def dual(eta):
                         ## paper version
-                        # return η * self.ε_dual + η * np.mean(np.log(np.mean(np.exp(target_q_np / η), axis=1)))
+                        return eta * self.eps_daul + eta * np.mean(np.log(np.mean(np.exp(target_q_np / eta), axis=1)))
 
                         ## stabilization version: move out max Q(s, a) to avoid overflow
-                        max_q = np.max(target_q_np, 1)
-                        return η * self.ε_dual + np.mean(max_q) \
-                            + η * np.mean(np.log(np.mean(np.exp((target_q_np - max_q[:, None]) / η), axis=1)))
+                        # max_q = np.max(target_q_np, 1)
+                        # return eta * self.eps_daul + np.mean(max_q) \
+                        #     + eta * np.mean(np.log(np.mean(np.exp((target_q_np - max_q[:, None]) / eta), axis=1)))
                     
-                    res = minimize(dual, np.array([self.η]), method='SLSQP', bounds=[(1e-6, None)])
-                    self.η = res.x[0]
+                    res = minimize(dual, np.array([self.eta]), method='SLSQP', bounds=[(1e-6, None)])
+                    self.eta = res.x[0]
 
                     # normalize
-                    norm_target_q = torch.softmax(target_q / self.η, dim=0)  # (N, K) or (action_dim, K)
+                    norm_target_q = torch.softmax(target_q / self.eta, dim=0)  # (N, K) or (action_dim, K)
 
                     # M-Step of Policy Improvement
                     for _ in range(self.mstep_iteration_num):
-                        μ, A = self.actor.forward(state_batch)
+                        mu, A = self.actor.forward(state_batch)
 
                         # paper1 version
-                        π = MultivariateNormal(loc=μ, scale_tril=A)  # (K,)
-                        loss_p = torch.mean( norm_target_q * π.expand((N, K)).log_prob(sampled_actions))  # (N, K)
-                        Cμ, CΣ, Σi_det, Σ_det = gaussian_kl( μi=b_μ, μ=μ, Ai=b_A, A=A)
+                        policy = MultivariateNormal(loc=mu, scale_tril=A)  # (K,)
+                        loss_p = torch.mean( norm_target_q * policy.expand((N, K)).log_prob(sampled_actions))  # (N, K)
+                        C_mu, C_sigma, sigma_i_det, sigma_det = gaussian_kl( mu_i=b_μ, mu=mu, Ai=b_A, A=A)
 
                         # paper2 version normalize
-                        # π1 = MultivariateNormal(loc=μ, scale_tril=b_A)  # (K,)
+                        # π1 = MultivariateNormal(loc=mu, scale_tril=b_A)  # (K,)
                         # π2 = MultivariateNormal(loc=b_μ, scale_tril=A)  # (K,)
                         # loss_p = torch.mean(
                         #     norm_target_q * (
@@ -198,22 +216,22 @@ class MPO(object):
                         #         + π2.expand((N, K)).log_prob(sampled_actions)  # (N, K)
                         #     )
                         # )
-                        # Cμ, CΣ, Σi_det, Σ_det = gaussian_kl( μi=b_μ, μ=μ, Ai=b_A, A=A)
+                        # C_mu, C_sigma, sigma_i_det, sigma_det = gaussian_kl( mu_i=b_μ, mu=mu, Ai=b_A, A=A)
                         
                         mean_loss_p.append((-loss_p).item())
-                        max_kl_μ.append(Cμ.item())
-                        max_kl_Σ.append(CΣ.item())
-                        mean_Σ_det.append(Σ_det.item())
+                        max_kl_mu.append(C_mu.item())
+                        max_kl_sigma.append(C_sigma.item())
+                        mean_sigma_det.append(sigma_det.item())
 
                         # Update lagrange multipliers by gradient descent
-                        self.η_μ -= self.α_μ_scale * (self.εμ - Cμ).detach().item()
-                        self.η_Σ -= self.α_Σ_scale * (self.εΣ - CΣ).detach().item()
+                        self.eta_mu -= self.alpha_mu_scale * (self.eps_mu - C_mu).detach().item()
+                        self.eta_sigma -= self.alpha_sigma_scale * (self.eps_gamma - C_sigma).detach().item()
 
-                        self.η_μ = np.clip(0.0, self.η_μ, self.α_μ_max)
-                        self.η_Σ = np.clip(0.0, self.η_Σ, self.α_Σ_max)
+                        self.eta_mu = np.clip(0.0, self.eta_mu, self.alpha_mu_max)
+                        self.eta_sigma = np.clip(0.0, self.eta_sigma, self.alpha_sigma_max)
 
                         self.actor_optimizer.zero_grad()
-                        loss_l = -( loss_p + self.η_μ * (self.εμ - Cμ) + self.η_Σ * (self.εΣ - CΣ))
+                        loss_l = -( loss_p + self.eta_mu * (self.eps_mu - C_mu) + self.eta_sigma * (self.eps_gamma - C_sigma))
                         mean_loss_l.append(loss_l.item())
                         loss_l.backward()
                         clip_grad_norm_(self.actor.parameters(), 0.1)
@@ -231,14 +249,14 @@ class MPO(object):
             mean_loss_p = np.mean(mean_loss_p)
             mean_loss_l = np.mean(mean_loss_l)
             mean_est_q = np.mean(mean_est_q)
-            max_kl_μ = np.max(max_kl_μ)
-            max_kl_Σ = np.max(max_kl_Σ)
-            mean_Σ_det = np.mean(mean_Σ_det)
+            max_kl_mu = np.max(max_kl_mu)
+            max_kl_sigma = np.max(max_kl_sigma)
+            mean_sigma_det = np.mean(mean_sigma_det)
 
             print('iteration :', it)
             if it % self.evaluate_period == 0:
                 self.actor.eval()
-                return_eval = self.__evaluate()
+                return_eval = self.evaluate()
                 self.actor.train()
                 self.max_return_eval = max(self.max_return_eval, return_eval)
                 print('  max_return_eval :', self.max_return_eval)
@@ -256,18 +274,53 @@ class MPO(object):
             writer.add_scalar('loss_p', mean_loss_p, it)
             writer.add_scalar('loss_l', mean_loss_l, it)
             writer.add_scalar('mean_q', mean_est_q, it)
-            writer.add_scalar('η', self.η, it)
-            writer.add_scalar('max_kl_μ', max_kl_μ, it)
-            writer.add_scalar('max_kl_Σ', max_kl_Σ, it)
-            writer.add_scalar('mean_Σ_det', mean_Σ_det, it)
-            writer.add_scalar('α_μ', self.η_μ, it)
-            writer.add_scalar('α_Σ', self.η_Σ, it)
+            writer.add_scalar('eta', self.eta, it)
+            writer.add_scalar('max_kl_mu', max_kl_mu, it)
+            writer.add_scalar('max_kl_sigma', max_kl_sigma, it)
+            writer.add_scalar('mean_sigma_det', mean_sigma_det, it)
+            writer.add_scalar('eta_mu', self.eta_mu, it)
+            writer.add_scalar('eta_sigma', self.eta_sigma, it)
 
             writer.flush()
 
         # end training
         if writer is not None:
             writer.close()
+
+    def critic_update_td(self, state_batch, action_batch, next_state_batch, reward_batch, sample_num=64):
+        B = state_batch.size(0)
+        with torch.no_grad():
+
+            ## get mean, cholesky from target actor --> to sample from Gaussian
+            pi_mean, pi_A = self.target_actor.forward(next_state_batch)  # (B,)
+            policy = MultivariateNormal(pi_mean, scale_tril=pi_A)  # (B,)
+            sampled_next_actions = policy.sample((sample_num,)).transpose(0, 1)  # (B, sample_num, action_dim)
+            expanded_next_states = next_state_batch[:, None, :].expand(-1, sample_num, -1)  # (B, sample_num, state_dim)
+            
+            ## get expected Q value from target critic
+            expected_next_q = self.target_critic.forward(
+                expanded_next_states.reshape(-1, self.state_dim),  # (B * sample_num, state_dim)
+                sampled_next_actions.reshape(-1, self.action_dim)  # (B * sample_num, action_dim)
+            ).reshape(B, sample_num).mean(dim=1)  # (B,)
+            
+            y = reward_batch + self.gamma * expected_next_q
+        self.critic_optimizer.zero_grad()
+        t = self.critic( state_batch, action_batch).squeeze()
+        loss = self.norm_loss_q(y, t)
+        loss.backward()
+        self.critic_optimizer.step()
+        return loss, y
+
+
+    def update_target_actor_critic(self):
+        # param(target_actor) <-- param(actor)
+        for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
+            target_param.data.copy_(param.data)
+
+        # param(target_critic) <-- param(critic)
+        for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
+            target_param.data.copy_(param.data)
+
 
     def load_model(self, path=None):
         load_path = path if path is not None else self.save_path
@@ -284,6 +337,7 @@ class MPO(object):
         self.actor.train()
         self.target_actor.train()
 
+
     def save_model(self, it, path=None):
         data = {
             'iteration': it,
@@ -296,75 +350,18 @@ class MPO(object):
         }
         torch.save(data, path)
 
-    def __sample_trajectory_worker(self, i):
-        buff = []
-        state = self.env.reset()
-        for steps in range(self.sample_episode_maxstep):
-            action = self.target_actor.action( torch.from_numpy(state).type(torch.float32).to(self.device)).cpu().numpy()
-            next_state, reward, done, _ = self.env.step(action)
-            buff.append((state, action, next_state, reward))
-            if self.render and i == 0:
-                self.env.render(mode='human')
-                sleep(0.01)
-            if done:
-                break
-            else:
-                state = next_state
-        return buff
 
-    def __sample_trajectory(self, sample_episode_num):
-        self.replaybuffer.clear()
-        episodes = [self.__sample_trajectory_worker(i)
-                    for i in tqdm(range(sample_episode_num), desc='sample_trajectory')]
-        self.replaybuffer.store_episodes(episodes)
-
-    def __evaluate(self):
+    def evaluate(self):
         with torch.no_grad():
             total_rewards = []
             for e in tqdm(range(self.evaluate_episode_num), desc='evaluating'):
                 total_reward = 0.0
                 state = self.env.reset()
                 for s in range(self.evaluate_episode_maxstep):
-                    action = self.actor.action(
-                        torch.from_numpy(state).type(torch.float32).to(self.device)
-                    ).cpu().numpy()
+                    action = self.actor.action(torch.from_numpy(state).type(torch.float32).to(self.device)).cpu().numpy()
                     state, reward, done, _ = self.env.step(action)
                     total_reward += reward
                     if done:
                         break
                 total_rewards.append(total_reward)
             return np.mean(total_rewards)
-
-
-    def __update_critic_td(self, state_batch, action_batch, next_state_batch, reward_batch, sample_num=64):
-        B = state_batch.size(0)
-        with torch.no_grad():
-
-            ## get mean, cholesky from target actor --> to sample from Gaussian
-            π_μ, π_A = self.target_actor.forward(next_state_batch)  # (B,)
-            π = MultivariateNormal(π_μ, scale_tril=π_A)  # (B,)
-            sampled_next_actions = π.sample((sample_num,)).transpose(0, 1)  # (B, sample_num, action_dim)
-            expanded_next_states = next_state_batch[:, None, :].expand(-1, sample_num, -1)  # (B, sample_num, state_dim)
-            
-            ## get expected Q value from target critic
-            expected_next_q = self.target_critic.forward(
-                expanded_next_states.reshape(-1, self.state_dim),  # (B * sample_num, state_dim)
-                sampled_next_actions.reshape(-1, self.action_dim)  # (B * sample_num, action_dim)
-            ).reshape(B, sample_num).mean(dim=1)  # (B,)
-            
-            y = reward_batch + self.γ * expected_next_q
-        self.critic_optimizer.zero_grad()
-        t = self.critic( state_batch, action_batch).squeeze()
-        loss = self.norm_loss_q(y, t)
-        loss.backward()
-        self.critic_optimizer.step()
-        return loss, y
-
-    def update_target_actor_critic(self):
-        # param(target_actor) <-- param(actor)
-        for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
-            target_param.data.copy_(param.data)
-
-        # param(target_critic) <-- param(critic)
-        for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
-            target_param.data.copy_(param.data)
