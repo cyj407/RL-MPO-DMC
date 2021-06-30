@@ -17,3 +17,22 @@
     python3 setup.py install
     ```
 - [dm_control2gym](https://github.com/martinseilair/dm_control2gym)
+- Other package, run
+```
+conda env create -f environment.yml
+```
+
+## Results
+- mean return on Hopper
+
+![](./images/hopper.png?raw=true)
+
+- Visualization
+
+![](./images/hopper_mse.gif?raw=true)
+
+
+## Reference
+- [Maximum a Posteriori Policy Optimisation](https://arxiv.org/pdf/1806.06920.pdf)
+- [DeepMind Control Suite](https://arxiv.org/pdf/1801.00690.pdf)
+- [Project_RL](https://github.com/theogruner/rl_pro_telu)
