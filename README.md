@@ -25,11 +25,11 @@ conda env create -f environment.yml
 ## Results
 - mean return on Hopper
 
-![](./images/hopper.png?raw=true)
+![](https://github.com/cyj407/RL-MPO-DMC/blob/master/images/hopper.png?raw=true)
 
 - Visualization
 
-![](./images/hopper_mse.gif?raw=true)
+![](https://github.com/cyj407/RL-MPO-DMC/blob/master/images/hopper_mse.gif?raw=true)
 
 
 ## Reference
